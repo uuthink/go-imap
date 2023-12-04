@@ -1,4 +1,4 @@
-module github.com/emersion/go-imap/v2
+module github.com/emersion/go-imap/v2_prod
 
 go 1.18
 
