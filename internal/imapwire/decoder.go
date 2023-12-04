@@ -130,6 +130,10 @@ func (dec *Decoder) Expect(ok bool, name string) bool {
 
 func (dec *Decoder) SP() bool {
 	if dec.acceptByte(' ') {
+		if dec.CRLF() {
+			dec.mustUnreadByte()
+			return false
+		}
 		return true
 	}
 
