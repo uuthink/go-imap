@@ -128,10 +128,24 @@ func (dec *Decoder) Expect(ok bool, name string) bool {
 	return true
 }
 
+// ExpectChar check the next byte
+func (dec *Decoder) ExpectChar(ch byte) bool {
+	if dec.r.Buffered() > 0 {
+		b, err := dec.r.Peek(1)
+		if err != nil || len(b) == 0 {
+			return false
+		}
+		if b[0] == ch {
+			return true
+		}
+	}
+	return false
+}
+
 func (dec *Decoder) SP() bool {
 	if dec.acceptByte(' ') {
-		if dec.CRLF() {
-			dec.mustUnreadByte()
+		// Special case: SP before a CRLF
+		if dec.ExpectChar('\r') || dec.ExpectChar('\n') {
 			return false
 		}
 		return true
