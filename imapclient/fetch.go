@@ -12,19 +12,26 @@ import (
 	"github.com/emersion/go-imap/v2/internal/imapwire"
 )
 
-func (c *Client) fetch(uid bool, seqSet imap.SeqSet, options *imap.FetchOptions) *FetchCommand {
+// Fetch sends a FETCH command.
+//
+// The caller must fully consume the FetchCommand. A simple way to do so is to
+// defer a call to FetchCommand.Close.
+//
+// A nil options pointer is equivalent to a zero options value.
+func (c *Client) Fetch(numSet imap.NumSet, options *imap.FetchOptions) *FetchCommand {
 	if options == nil {
 		options = new(imap.FetchOptions)
 	}
 
+	numKind := imapwire.NumSetKind(numSet)
+
 	cmd := &FetchCommand{
-		uid:    uid,
-		seqSet: seqSet,
+		numSet: numSet,
 		msgs:   make(chan *FetchMessageData, 128),
 	}
-	enc := c.beginCommand(uidCmdName("FETCH", uid), cmd)
-	enc.SP().SeqSet(seqSet).SP()
-	writeFetchItems(enc.Encoder, uid, options)
+	enc := c.beginCommand(uidCmdName("FETCH", numKind), cmd)
+	enc.SP().NumSet(numSet).SP()
+	writeFetchItems(enc.Encoder, numKind, options)
 	if options.ChangedSince != 0 {
 		enc.SP().Special('(').Atom("CHANGEDSINCE").SP().ModSeq(options.ChangedSince).Special(')')
 	}
@@ -32,29 +39,12 @@ func (c *Client) fetch(uid bool, seqSet imap.SeqSet, options *imap.FetchOptions)
 	return cmd
 }
 
-// Fetch sends a FETCH command.
-//
-// The caller must fully consume the FetchCommand. A simple way to do so is to
-// defer a call to FetchCommand.Close.
-//
-// A nil options pointer is equivalent to a zero options value.
-func (c *Client) Fetch(seqSet imap.SeqSet, options *imap.FetchOptions) *FetchCommand {
-	return c.fetch(false, seqSet, options)
-}
-
-// UIDFetch sends a UID FETCH command.
-//
-// See Fetch.
-func (c *Client) UIDFetch(seqSet imap.SeqSet, options *imap.FetchOptions) *FetchCommand {
-	return c.fetch(true, seqSet, options)
-}
-
-func writeFetchItems(enc *imapwire.Encoder, uid bool, options *imap.FetchOptions) {
+func writeFetchItems(enc *imapwire.Encoder, numKind imapwire.NumKind, options *imap.FetchOptions) {
 	listEnc := enc.BeginList()
 
 	// Ensure we request UID as the first data item for UID FETCH, to be safer.
 	// We want to get it before any literal.
-	if options.UID || uid {
+	if options.UID || numKind == imapwire.NumKindUID {
 		listEnc.Item().Atom("UID")
 	}
 
@@ -159,12 +149,40 @@ func writeSectionPartial(enc *imapwire.Encoder, partial *imap.SectionPartial) {
 type FetchCommand struct {
 	cmd
 
-	uid        bool
-	seqSet     imap.SeqSet
+	numSet     imap.NumSet
 	recvSeqSet imap.SeqSet
+	recvUIDSet imap.UIDSet
 
 	msgs chan *FetchMessageData
 	prev *FetchMessageData
+}
+
+func (cmd *FetchCommand) recvSeqNum(seqNum uint32) bool {
+	set, ok := cmd.numSet.(imap.SeqSet)
+	if !ok || !set.Contains(seqNum) {
+		return false
+	}
+
+	if cmd.recvSeqSet.Contains(seqNum) {
+		return false
+	}
+
+	cmd.recvSeqSet.AddNum(seqNum)
+	return true
+}
+
+func (cmd *FetchCommand) recvUID(uid imap.UID) bool {
+	set, ok := cmd.numSet.(imap.UIDSet)
+	if !ok || !set.Contains(uid) {
+		return false
+	}
+
+	if cmd.recvUIDSet.Contains(uid) {
+		return false
+	}
+
+	cmd.recvUIDSet.AddNum(uid)
+	return true
 }
 
 // Next advances to the next message.
@@ -175,7 +193,8 @@ func (cmd *FetchCommand) Next() *FetchMessageData {
 	if cmd.prev != nil {
 		cmd.prev.discard()
 	}
-	return <-cmd.msgs
+	cmd.prev = <-cmd.msgs
+	return cmd.prev
 }
 
 // Close releases the command.
@@ -346,7 +365,7 @@ func (FetchItemDataRFC822Size) fetchItemData() {}
 
 // FetchItemDataUID holds data returned by FETCH UID.
 type FetchItemDataUID struct {
-	UID uint32
+	UID imap.UID
 }
 
 func (FetchItemDataUID) fetchItemData() {}
@@ -386,7 +405,7 @@ type FetchMessageBuffer struct {
 	Envelope          *imap.Envelope
 	InternalDate      time.Time
 	RFC822Size        int64
-	UID               uint32
+	UID               imap.UID
 	BodyStructure     imap.BodyStructure
 	BodySection       map[*imap.FetchItemBodySection][]byte
 	BinarySection     map[*imap.FetchItemBinarySection][]byte
@@ -449,7 +468,7 @@ func (c *Client) handleFetch(seqNum uint32) error {
 	// the response data. But the response data comes in in a streaming
 	// fashion: it can contain literals. Assume that the UID will be returned
 	// before any literal.
-	var uid uint32
+	var uid imap.UID
 	handled := false
 	handleMsg := func() {
 		if handled {
@@ -463,18 +482,11 @@ func (c *Client) handleFetch(seqNum uint32) error {
 			}
 
 			// Skip if we haven't requested or already handled this message
-			var num uint32
-			if cmd.uid {
-				num = uid
+			if _, ok := cmd.numSet.(imap.UIDSet); ok {
+				return uid != 0 && cmd.recvUID(uid)
 			} else {
-				num = seqNum
+				return seqNum != 0 && cmd.recvSeqNum(seqNum)
 			}
-			if num == 0 || !cmd.seqSet.Contains(num) || cmd.recvSeqSet.Contains(num) {
-				return false
-			}
-			cmd.recvSeqSet.AddNum(num)
-
-			return true
 		})
 		if cmd != nil {
 			cmd := cmd.(*FetchCommand)
@@ -543,7 +555,7 @@ func (c *Client) handleFetch(seqNum uint32) error {
 
 			item = FetchItemDataRFC822Size{Size: size}
 		case "UID":
-			if !dec.ExpectSP() || !dec.ExpectNumber(&uid) {
+			if !dec.ExpectSP() || !dec.ExpectUID(&uid) {
 				return dec.Err()
 			}
 
@@ -806,6 +818,13 @@ func readBodyType1part(dec *imapwire.Decoder, typ string, options *Options) (*im
 	if !dec.ExpectSP() || !dec.ExpectNString(&bs.ID) || !dec.ExpectSP() || !dec.ExpectNString(&description) || !dec.ExpectSP() || !dec.ExpectNString(&bs.Encoding) || !dec.ExpectSP() || !dec.ExpectNumber(&bs.Size) {
 		return nil, dec.Err()
 	}
+
+	// Content-Transfer-Encoding should always be set, but some non-standard
+	// servers leave it NIL. Default to 7BIT.
+	if bs.Encoding == "" {
+		bs.Encoding = "7BIT"
+	}
+
 	// TODO: handle errors
 	bs.Description, _ = options.decodeText(description)
 

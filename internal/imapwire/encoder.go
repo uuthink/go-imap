@@ -158,8 +158,8 @@ func (enc *Encoder) Mailbox(name string) *Encoder {
 	}
 }
 
-func (enc *Encoder) SeqSet(seqSet imap.SeqSet) *Encoder {
-	s := seqSet.String()
+func (enc *Encoder) NumSet(numSet imap.NumSet) *Encoder {
+	s := numSet.String()
 	if s == "" {
 		enc.setErr(fmt.Errorf("imapwire: cannot encode empty sequence set"))
 		return enc
@@ -239,6 +239,10 @@ func (enc *Encoder) NIL() *Encoder {
 
 func (enc *Encoder) Text(s string) *Encoder {
 	return enc.writeString(s)
+}
+
+func (enc *Encoder) UID(uid imap.UID) *Encoder {
+	return enc.Number(uint32(uid))
 }
 
 // Literal writes a literal.

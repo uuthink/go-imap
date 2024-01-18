@@ -22,6 +22,7 @@ package imapclient
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -317,7 +318,7 @@ func (c *Client) Close() error {
 	c.mutex.Unlock()
 
 	// Ignore net.ErrClosed here, because we also call conn.Close in c.read
-	if err := c.conn.Close(); err != nil && err != net.ErrClosed {
+	if err := c.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
 
@@ -518,7 +519,8 @@ func (c *Client) read() {
 
 	c.setReadTimeout(idleReadTimeout)
 	for {
-		if c.dec.EOF() {
+		// Ignore net.ErrClosed here, because we also call conn.Close in c.Close
+		if c.dec.EOF() || errors.Is(c.dec.Err(), net.ErrClosed) {
 			break
 		}
 		if err := c.readResponse(); err != nil {
@@ -638,8 +640,11 @@ func (c *Client) readResponseTagged(tag, typ string) (startTLS *startTLSCommand,
 			}
 			c.setCaps(caps)
 		case "APPENDUID":
-			var uidValidity, uid uint32
-			if !c.dec.ExpectSP() || !c.dec.ExpectNumber(&uidValidity) || !c.dec.ExpectSP() || !c.dec.ExpectNumber(&uid) {
+			var (
+				uidValidity uint32
+				uid         imap.UID
+			)
+			if !c.dec.ExpectSP() || !c.dec.ExpectNumber(&uidValidity) || !c.dec.ExpectSP() || !c.dec.ExpectUID(&uid) {
 				return nil, fmt.Errorf("in resp-code-apnd: %v", c.dec.Err())
 			}
 			if cmd, ok := cmd.(*AppendCommand); ok {
@@ -650,7 +655,7 @@ func (c *Client) readResponseTagged(tag, typ string) (startTLS *startTLSCommand,
 			if !c.dec.ExpectSP() {
 				return nil, c.dec.Err()
 			}
-			uidValidity, srcUIDs, dstUIDs, err := readRespCodeCopy(c.dec)
+			uidValidity, srcUIDs, dstUIDs, err := readRespCodeCopyUID(c.dec)
 			if err != nil {
 				return nil, fmt.Errorf("in resp-code-copy: %v", err)
 			}
@@ -760,8 +765,8 @@ func (c *Client) readResponseData(typ string) error {
 					handler(&UnilateralDataMailbox{PermanentFlags: flags})
 				}
 			case "UIDNEXT":
-				var uidNext uint32
-				if !c.dec.ExpectSP() || !c.dec.ExpectNumber(&uidNext) {
+				var uidNext imap.UID
+				if !c.dec.ExpectSP() || !c.dec.ExpectUID(&uidNext) {
 					return c.dec.Err()
 				}
 				if cmd := findPendingCmdByType[*SelectCommand](c); cmd != nil {
@@ -779,7 +784,7 @@ func (c *Client) readResponseData(typ string) error {
 				if !c.dec.ExpectSP() {
 					return c.dec.Err()
 				}
-				uidValidity, srcUIDs, dstUIDs, err := readRespCodeCopy(c.dec)
+				uidValidity, srcUIDs, dstUIDs, err := readRespCodeCopyUID(c.dec)
 				if err != nil {
 					return fmt.Errorf("in resp-code-copy: %v", err)
 				}
@@ -905,8 +910,15 @@ func (c *Client) readResponseData(typ string) error {
 
 // WaitGreeting waits for the server's initial greeting.
 func (c *Client) WaitGreeting() error {
-	<-c.greetingCh
-	return c.greetingErr
+	select {
+	case <-c.greetingCh:
+		return c.greetingErr
+	case <-c.decCh:
+		if c.decErr != nil {
+			return fmt.Errorf("got error before greeting: %v", c.decErr)
+		}
+		return fmt.Errorf("connection closed before greeting")
+	}
 }
 
 // Noop sends a NOOP command.
@@ -970,11 +982,14 @@ func (c *Client) Unsubscribe(mailbox string) *Command {
 	return cmd
 }
 
-func uidCmdName(name string, uid bool) string {
-	if uid {
-		return "UID " + name
-	} else {
+func uidCmdName(name string, kind imapwire.NumKind) string {
+	switch kind {
+	case imapwire.NumKindSeq:
 		return name
+	case imapwire.NumKindUID:
+		return "UID " + name
+	default:
+		panic("imapclient: invalid imapwire.NumKind")
 	}
 }
 

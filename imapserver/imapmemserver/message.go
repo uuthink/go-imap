@@ -19,7 +19,7 @@ import (
 
 type message struct {
 	// immutable
-	uid uint32
+	uid imap.UID
 	buf []byte
 	t   time.Time
 
@@ -244,8 +244,8 @@ func (msg *message) search(seqNum uint32, criteria *imap.SearchCriteria) bool {
 			return false
 		}
 	}
-	for _, seqSet := range criteria.UID {
-		if !seqSet.Contains(msg.uid) {
+	for _, uidSet := range criteria.UID {
+		if !uidSet.Contains(msg.uid) {
 			return false
 		}
 	}

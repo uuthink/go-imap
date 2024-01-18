@@ -24,8 +24,8 @@ type fetchWriterOptions struct {
 }
 
 func (c *Conn) handleFetch(dec *imapwire.Decoder, numKind NumKind) error {
-	var seqSet imap.SeqSet
-	if !dec.ExpectSP() || !dec.ExpectSeqSet(&seqSet) || !dec.ExpectSP() {
+	var numSet imap.NumSet
+	if !dec.ExpectSP() || !dec.ExpectNumSet(numKind.wire(), &numSet) || !dec.ExpectSP() {
 		return dec.Err()
 	}
 
@@ -88,7 +88,7 @@ func (c *Conn) handleFetch(dec *imapwire.Decoder, numKind NumKind) error {
 	}
 
 	w := &FetchWriter{conn: c, options: writerOptions}
-	if err := c.session.Fetch(w, numKind, seqSet, &options); err != nil {
+	if err := c.session.Fetch(w, numSet, &options); err != nil {
 		return err
 	}
 	return nil
@@ -349,9 +349,9 @@ func (w *FetchResponseWriter) writeItemSep() {
 }
 
 // WriteUID writes the message's UID.
-func (w *FetchResponseWriter) WriteUID(uid uint32) {
+func (w *FetchResponseWriter) WriteUID(uid imap.UID) {
 	w.writeItemSep()
-	w.enc.Atom("UID").SP().Number(uid)
+	w.enc.Atom("UID").SP().UID(uid)
 }
 
 // WriteFlags writes the message's flags.
