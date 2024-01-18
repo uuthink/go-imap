@@ -708,7 +708,7 @@ func readEnvelope(dec *imapwire.Decoder, options *Options) (*imap.Envelope, erro
 		*addrList.out = l
 	}
 
-	if !dec.ExpectNString(&envelope.InReplyTo) || !dec.ExpectSP() || !dec.ExpectNString(&envelope.MessageID) {
+	if !dec.ExpectNString(&envelope.InReplyTo) || !dec.ExpectChar(')') && (!dec.ExpectSP() || !dec.ExpectNString(&envelope.MessageID)) {
 		return nil, dec.Err()
 	}
 
